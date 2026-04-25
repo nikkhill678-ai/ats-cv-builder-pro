@@ -3,6 +3,7 @@ import PyPDF2
 from docx import Document
 import json
 from fpdf import FPDF
+from datetime import datetime
 
 # ------------------- CONFIG -------------------
 st.set_page_config(page_title="ATS CV Builder", layout="wide")
@@ -27,8 +28,9 @@ def extract_text_from_docx(uploaded_file):
 def call_gemini(prompt, api_key):
     import google.generativeai as genai
     genai.configure(api_key=api_key)
+    # Updated to Gemini 2.5 Flash – the model you are using
     model = genai.GenerativeModel(
-        'gemini-2.5-flash',   # your working model name
+        'gemini-2.5-flash',
         generation_config={"response_mime_type": "application/json"}
     )
     response = model.generate_content(prompt)
@@ -49,36 +51,40 @@ def call_gpt(prompt, api_key, model_name):
     return response.choices[0].message.content
 
 def create_ats_pdf(cv_text, output_path="tailored_cv.pdf"):
-    """Generate a clean, ATS-friendly PDF from plain text CV."""
+    """
+    Generate a plain‑text PDF that exactly mirrors the CV text.
+    No bolding, no font changes – only words are added/removed.
+    The bullet character is replaced with '-' to avoid font issues.
+    """
+    # Replace Unicode bullet with a safe ASCII hyphen
+    sanitized = cv_text.replace('•', '-')
     pdf = FPDF()
     pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
-    pdf.set_font("Helvetica", size=11)
-    lines = cv_text.split('\n')
+    pdf.set_font("Helvetica", size=11)   # same font through‑out, no bold
+
+    lines = sanitized.split('\n')
     for line in lines:
-        line = line.strip()
-        if not line:
+        # Keep the original spacing: empty lines become a small gap
+        if not line.strip():
             pdf.ln(4)
             continue
-        if line.isupper() and len(line) > 3:
-            pdf.set_font("Helvetica", 'B', 12)
-            pdf.cell(0, 7, line, ln=True)
-            pdf.set_font("Helvetica", size=11)
-            pdf.ln(1)
-        else:
-            if line.startswith('•') or line.startswith('-'):
-                pdf.cell(5)
-                pdf.multi_cell(0, 5, line)
-            else:
-                pdf.multi_cell(0, 5, line)
+        # Write the line as plain text, no indentation changes
+        pdf.set_font("Helvetica", size=11)
+        pdf.multi_cell(0, 5, line)
+
     pdf.output(output_path)
     return output_path
 
-# ------------------- ATS ANALYSIS PROMPT (GOLD STANDARD) -------------------
+# ------------------- ATS ANALYSIS PROMPT (GOLD STANDARD, DATE‑AWARE) -------------------
 def build_analysis_prompt(jd_text, cv_text):
+    today_str = datetime.now().strftime("%B %d, %Y")
     return f"""
 You are a dual expert: a certified ATS (Applicant Tracking System) architect AND a senior executive recruiter who has placed candidates at Fortune 100 companies.  
 Your audit must be indistinguishable from a $1,000 professional CV review.
+
+**TODAY'S DATE: {today_str}** — use this to judge whether dates in the CV are past, present, or future.  
+Dates that are before today are valid past experience. Only flag dates that are genuinely in the future relative to today as an error.
 
 ## SCORING FRAMEWORK (6 dimensions, total 100 points)
 
@@ -129,67 +135,45 @@ CANDIDATE CV:
 Return ONLY the JSON.
 """
 
-# ------------------- CV GENERATION PROMPT -------------------
+# ------------------- CV GENERATION PROMPT (HEADINGS UNCHANGED, ARC STYLE) -------------------
 def build_generation_prompt(jd_text, cv_text):
+    today_str = datetime.now().strftime("%B %d, %Y")
     prompt = f"""
 You are a senior recruitment consultant and ATS (Applicant Tracking System) engineer.  
 Your dual task: rewrite a CV so it (a) passes ATS screens with a 90%+ match, and (b) looks professional and truthful to a human HR manager.
 
+**TODAY'S DATE: {today_str}** — use this to verify that all experience dates are in the past or currently ongoing (e.g., “present”). Never flag past dates as future.
+
 ---
 
-## RECRUITER / HR EXPECTATIONS (YOU MUST FOLLOW)
+## NON‑NEGOTIABLE RULES
 
-1. **Truthfulness above all**  
+1. **DO NOT CHANGE ANY SECTION HEADINGS**  
+   - Keep every section title exactly as it appears in the original CV. Do not add, remove, or rename any heading.  
+   - Examples: if the original says "PROFILE SUMMARY", keep it that way. If it says "WORK EXPERIENCE", do not change it to "PROFESSIONAL EXPERIENCE".  
+   - Your job is ONLY to improve the **content** under each heading.
+
+2. **Truthfulness above all**  
    - Only use information that EXISTS in the original CV.  
    - Do NOT invent skills, qualifications, job titles, dates, or metrics.  
    - If the original CV doesn't mention a skill, do NOT add it — even if the job requires it. You may only rephrase and rearrange existing facts.
 
-2. **Scannability for human eyes**  
-   - Use clear, conventional section titles exactly: PROFESSIONAL SUMMARY, CORE COMPETENCIES, PROFESSIONAL EXPERIENCE, EDUCATION.  
-   - Bullet points (•) for duties, maximum 5-7 per role.  
-   - Start each bullet with a strong action verb (Led, Developed, Implemented…).  
-   - Keep paragraphs short; white space is good.
+3. **Scannable bullet points (ARC approach)**  
+   - Each bullet must follow the **Action → Result → Context** pattern where possible:  
+     *Action*: strong verb (Led, Developed, Implemented…)  
+     *Result*: measurable outcome or scope (e.g., “increased efficiency by 20%”, “managed a team of 5”)  
+     *Context*: brief situation or tools used.  
+   - Quantify achievements using numbers **only if they already appear** in the original CV. Otherwise use descriptive scope phrases like "managed multiple", "led cross‑functional teams", "handled end‑to‑end delivery".
 
-3. **Quantify naturally**  
-   - Use numbers already in the CV (e.g., “managed a team of 5”, “reduced processing time by 30%”).  
-   - If no numbers exist, use descriptive scope phrases like “managed multiple projects”, “led cross-functional teams”, “handled end-to-end delivery”. Do NOT fabricate percentages or figures.
-
-4. **Professional summary**  
-   - 3–4 lines max.  
-   - Include job title you're targeting (taken from the original CV or a truthful equivalent), years of experience, top 2–3 hard skills that match the job, and a value proposition.
-
-5. **Education section**  
-   - Degree, institution, year. If omitted in the original, keep what’s there; never guess.
-
----
-
-## ATS REQUIREMENTS (YOU MUST ALSO FOLLOW)
-
-ATS software behaves in a standard way. Your output must pass these filters:
-
-6. **Pure plain text** – single column only.  
-   - No tables, no columns, no graphics, no text boxes, no headers/footers.  
-   - No special characters (except bullet •), no symbols, no icons.
-
-7. **Keyword matching**  
+4. **ATS keyword embedding**  
    - Extract EXACTLY 15-20 important keywords from the job description (hard skills, tools, certifications, methodologies).  
-   - Embed these keywords naturally in the CV WHERE THEY TRUTHFULLY APPLY.  
+   - Embed these keywords naturally in the CV WHERE THEY TRUTHFULLY APPLY **without changing headings**.  
    - If the original CV already contains synonyms, replace them with the job description’s exact phrasing (e.g., if the JD says “Agile methodologies” and the CV says “Scrum”, use “Agile (Scrum)”).
 
-8. **Standard section ordering**  
-   - ATS expects: Profile/Summary → Skills → Experience → Education.  
-   - Use exactly these titles: PROFESSIONAL SUMMARY, CORE COMPETENCIES, PROFESSIONAL EXPERIENCE, EDUCATION.  
-   - Do not rename them, even if it looks repetitive.
-
-9. **Job title / dates alignment**  
-   - Use “Month Year – Month Year” format for dates.  
-   - Job titles should be clear and industry-standard; avoid creative internal titles. If the original title is vague, keep it but add context in the bullet points.
-
-10. **Bold / italics are not needed** – plain text is parsed more reliably.
-
-11. **Avoid ATS traps**  
-    - Do not use acronyms without spelling them out at least once (e.g., “Search Engine Optimization (SEO)”).  
-    - Do not place contact details in the header (omit them entirely from the generated CV – just write [Your Contact Info] as a placeholder). The candidate will fill them in later.
+5. **Formatting fidelity**  
+   - Output plain text only – single column, no tables, no graphics.  
+   - Use bullet points (•) for lists, but do **not** change the overall layout or headings.  
+   - Keep contact details as they are; if they are missing, simply write `[Your Contact Info]`.
 
 ---
 
@@ -197,17 +181,19 @@ ATS software behaves in a standard way. Your output must pass these filters:
 
 Based on the job description and the original CV provided below, you must:
 
-A. **Rewrite the CV** into a fully ATS‑compliant, recruiter‑friendly document following ALL the rules above. Output this as a string.
+A. **Rewrite the CV content** under each original heading. Follow all rules above. Return this as a string.
 
-B. **Produce a detailed change log** — a list of bullet points explaining what you changed and WHY (from an ATS/HR perspective).  
-   Example:  
-   - “Replaced ‘Scrum’ with ‘Agile (Scrum)’ because the job description repeatedly uses ‘Agile’. ATS will score keyword match higher.”  
-   - “Added sub-heading ‘Professional Summary’ because original had no summary. ATS looks for this section to extract profile data.”  
-   - “Rephrased bullet 3 to start with ‘Led’ instead of ‘Was responsible for’ – action verbs improve scan readability for recruiters.”  
+B. **Produce a detailed change log** — a list of bullet points explaining every modification you made and WHY (from an ATS/HR perspective).  
+   - **Format requirement**: Each bullet must be on a **new line**, start with `• ` (bullet and space). Example:  
+     `• Replaced ‘Scrum’ with ‘Agile (Scrum)’ because the job description repeatedly uses ‘Agile’.`  
+     DO NOT run them together in one paragraph.
 
-C. Return your answer as a valid JSON object with exactly two fields:  
-   - `"optimized_cv"`: the full rewritten CV (string).  
-   - `"changes"`: a string containing the change log (bullet points separated by newlines).
+C. **Generate further improvement suggestions** — a list of 3-5 actionable tips the candidate could use to raise their ATS score even more, beyond what you were able to change. These should be specific and truthful.
+
+Return your answer as a valid JSON object with EXACTLY three fields:  
+- `"optimized_cv"`: the full rewritten CV (string).  
+- `"changes"`: a string containing the change log (bullet points, each on a new line).  
+- `"further_suggestions"`: a string containing the additional improvement tips (bullet points, each on a new line).
 
 ---
 
@@ -314,7 +300,7 @@ if generate_clicked:
     elif not cv_text or len(cv_text.strip()) < 20:
         st.warning("Please upload a valid CV with enough text.")
     else:
-        prompt = build_generation_prompt(jd_text, cv_text)   # <-- FIXED: using the correct function name
+        prompt = build_generation_prompt(jd_text, cv_text)
         with st.spinner("✨ Tailoring your CV..."):
             try:
                 if "Gemini" in provider:
@@ -325,6 +311,7 @@ if generate_clicked:
                 result = json.loads(raw_response)
                 st.session_state["optimized_cv"] = result["optimized_cv"]
                 st.session_state["changes"] = result["changes"]
+                st.session_state["further_suggestions"] = result.get("further_suggestions", "No further suggestions.")
                 st.success("Tailored CV generated! Results below.")
             except json.JSONDecodeError:
                 st.error("AI did not return valid JSON. Raw response:")
@@ -374,17 +361,16 @@ if "analysis" in st.session_state:
 # ------------------- DISPLAY GENERATION RESULTS -------------------
 if "optimized_cv" in st.session_state:
     st.divider()
-    tab_cv, tab_changes = st.tabs(["📝 New ATS CV", "🔍 What Changed"])
+    tab_cv, tab_changes, tab_suggestions = st.tabs(["📝 New ATS CV", "🔍 What Changed", "💡 Further Improvement Tips"])
+
     with tab_cv:
         st.subheader("Your Optimised CV")
-        # Editable text area (full height)
         edited = st.text_area(
             "Copy, edit, or refine:",
             value=st.session_state["optimized_cv"],
             height=400,
             key="edit_cv"
         )
-        # Update session state when user edits
         if edited != st.session_state["optimized_cv"]:
             st.session_state["optimized_cv"] = edited
 
@@ -421,10 +407,14 @@ if "optimized_cv" in st.session_state:
                         new_analysis = json.loads(raw)
                         st.session_state["analysis"] = new_analysis
                         st.success("Re‑scored! Scroll up to see the new report.")
-                        st.rerun()   # updated from st.experimental_rerun
+                        st.rerun()
                     except Exception as e:
                         st.error(f"Re‑scoring failed: {e}")
 
     with tab_changes:
         st.subheader("Detailed Change Log")
         st.markdown(st.session_state["changes"])
+
+    with tab_suggestions:
+        st.subheader("What else could improve your CV?")
+        st.markdown(st.session_state["further_suggestions"])
